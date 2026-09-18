@@ -1,36 +1,52 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Taller QR
 
-## Getting Started
+Panel para generar QRs dinámicos de tarjetas PVC. El código impreso apunta siempre a `{APP_BASE_URL}/r/{codigo}`. El destino (Maps u otro) se cambia desde el panel, sin reimprimir.
 
-First, run the development server:
+## Arranque local
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+1. Copiá `.env.example` a `.env` y completá:
+
+```
+DATABASE_URL="mysql://USER:PASSWORD@localhost:3306/qr_generator"
+APP_BASE_URL="http://localhost:3000"
+ADMIN_PASSWORD="tu-clave"
+AUTH_SECRET="un-secreto-largo"
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Creá la base en MySQL:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```sql
+CREATE DATABASE qr_generator CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Instalá dependencias, generá el client y corré la migración:
 
-## Learn More
+```bash
+npm install
+npx prisma migrate dev
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+El panel queda en [http://localhost:3000/admin](http://localhost:3000/admin) (inventario) y [http://localhost:3000/admin/generar](http://localhost:3000/admin/generar). El login usa `ADMIN_PASSWORD` y deja un JWT httpOnly que vence a las 8 horas.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Scripts
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `npm run dev` — servidor local
+- `npm run db:migrate` — `prisma migrate dev`
+- `npm run db:push` — empuja el schema sin archivo de migración
+- `npm run db:studio` — Prisma Studio
 
-## Deploy on Vercel
+## Cómo funciona un escaneo
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. La tarjeta lleva `{APP_BASE_URL}/r/{codigo}`.
+2. El server busca el código, suma 1 a `scanCount` y redirige al `destinationUrl`.
+3. Si no hay código o no hay link, muestra “QR sin destino”.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Bloque 7 (cuando tengas dominio y MySQL remoto)
+
+No hace falta código nuevo. En el hosting cambiá:
+
+- `DATABASE_URL` a tu MySQL remoto
+- `APP_BASE_URL` a `https://tudominio.com`
+
+Después corré `npx prisma migrate deploy` contra esa base. Recién ahí el QR impreso funciona fuera de tu máquina. No reimprimas tarjetas generadas con `localhost`.
