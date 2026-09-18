@@ -1,6 +1,6 @@
 import type { QrStatus } from "@prisma/client";
-import { listQrs } from "@/app/actions/qrs";
 import { toQrDto } from "@/lib/qr-dto";
+import { listQrs } from "@/lib/qr-queries";
 import { isQrStatus } from "@/lib/qr-status";
 import { InventoryPanel } from "./inventory-panel";
 

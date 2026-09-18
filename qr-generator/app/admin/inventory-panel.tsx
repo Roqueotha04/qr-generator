@@ -3,8 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import type { QrStatus } from "@prisma/client";
-import { updateQr } from "@/app/actions/qrs";
+import { updateQr, voidQr } from "@/app/actions/qrs";
+import { qrPublicUrl } from "@/lib/codes";
 import type { QrDto } from "@/lib/qr-dto";
+import { canVoidQr } from "@/lib/qr-rules";
 import { QR_STATUS_LABELS, QR_STATUSES } from "@/lib/qr-status";
 import { QrPlate } from "./qr-plate";
 
@@ -49,7 +51,7 @@ export function InventoryPanel({ qrs, filters, publicBase }: InventoryPanelProps
         <ul className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
           {qrs.map((qr) => (
             <li key={qr.id}>
-              <QrEditor qr={qr} publicUrl={`${publicBase.replace(/\/$/, "")}/r/${qr.code}`} />
+              <QrEditor qr={qr} publicUrl={qrPublicUrl(qr.code, publicBase)} />
             </li>
           ))}
         </ul>
@@ -124,6 +126,11 @@ function QrEditor({ qr, publicUrl }: { qr: QrDto; publicUrl: string }) {
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
   const created = new Date(qr.createdAt).toLocaleDateString("es-AR");
+  const lastScan = qr.lastScannedAt
+    ? new Date(qr.lastScannedAt).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" })
+    : null;
+  const sold = qr.status === "sold";
+  const voidable = canVoidQr(qr);
 
   return (
     <article className="border border-rule bg-panel">
@@ -148,7 +155,8 @@ function QrEditor({ qr, publicUrl }: { qr: QrDto; publicUrl: string }) {
           <select
             name="status"
             defaultValue={qr.status}
-            className="border border-rule bg-floor px-1.5 py-1 text-xs text-paper"
+            disabled={sold}
+            className="border border-rule bg-floor px-1.5 py-1 text-xs text-paper disabled:opacity-60"
           >
             {QR_STATUSES.map((status) => (
               <option key={status} value={status}>
@@ -157,6 +165,9 @@ function QrEditor({ qr, publicUrl }: { qr: QrDto; publicUrl: string }) {
             ))}
           </select>
         </label>
+        {sold ? (
+          <p className="text-[10px] text-muted">Vendido: se puede cambiar el link, no anularse.</p>
+        ) : null}
         <label className="flex flex-col gap-0.5 text-[10px] text-muted">
           Cliente
           <input
@@ -179,6 +190,9 @@ function QrEditor({ qr, publicUrl }: { qr: QrDto; publicUrl: string }) {
           <p className="font-mono text-[10px] text-cyan">{qr.scanCount} ingresos</p>
           <p className="text-[10px] text-muted">{created}</p>
         </div>
+        <p className="text-[10px] text-muted">
+          {lastScan ? `Último escaneo: ${lastScan}` : "Todavía no se escaneó"}
+        </p>
         <button
           type="submit"
           disabled={pending}
@@ -188,6 +202,27 @@ function QrEditor({ qr, publicUrl }: { qr: QrDto; publicUrl: string }) {
         </button>
         {message ? <p className="text-[10px] text-muted">{message}</p> : null}
       </form>
+      {voidable ? (
+        <div className="border-t border-rule p-2">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              if (!window.confirm(`¿Anular ${qr.code}? El código no se vuelve a usar.`)) {
+                return;
+              }
+              startTransition(async () => {
+                const result = await voidQr({ id: qr.id });
+                setMessage(result.ok ? "Anulado" : result.error);
+                if (result.ok) router.refresh();
+              });
+            }}
+            className="w-full border border-press/40 px-2 py-1 text-xs text-press disabled:opacity-60"
+          >
+            Anular
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }

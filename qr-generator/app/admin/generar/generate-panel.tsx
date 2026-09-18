@@ -4,7 +4,12 @@ import { useState, useTransition } from "react";
 import { createQrs } from "@/app/actions/qrs";
 import { QR_STATUS_LABELS, QR_STATUSES } from "@/lib/qr-status";
 
-export function GeneratePanel() {
+type GeneratePanelProps = {
+  publicBase: string;
+  warnLocalBase: boolean;
+};
+
+export function GeneratePanel({ publicBase, warnLocalBase }: GeneratePanelProps) {
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -16,6 +21,11 @@ export function GeneratePanel() {
         <p className="mt-1 max-w-xl text-sm text-muted">
           El lote nace con estos datos. El link puede quedar vacío: la tarjeta queda lista y el destino se carga después.
         </p>
+        {warnLocalBase ? (
+          <p className="mt-4 max-w-xl border border-press/40 bg-press/10 px-3 py-2 text-sm text-paper">
+            APP_BASE_URL es local ({publicBase}). Estos QRs no van a funcionar en un celular fuera de esta PC. No los mandes a imprimir.
+          </p>
+        ) : null}
       </header>
 
       <form
@@ -24,16 +34,20 @@ export function GeneratePanel() {
           setMessage(null);
           setError(null);
           startTransition(async () => {
-            const result = await createQrs({
-              count: Number(formData.get("count") ?? 1),
-              clientName: String(formData.get("clientName") ?? ""),
-              destinationUrl: String(formData.get("destinationUrl") ?? ""),
-              status: String(formData.get("status") ?? "unused"),
-            });
-            if (result.ok) {
-              setMessage(`Se generaron ${result.count} QR${result.count === 1 ? "" : "s"}.`);
-            } else {
-              setError(result.error);
+            try {
+              const result = await createQrs({
+                count: formData.get("count"),
+                clientName: formData.get("clientName"),
+                destinationUrl: formData.get("destinationUrl"),
+                status: formData.get("status"),
+              });
+              if (result.ok) {
+                setMessage(`Se generaron ${result.count} QR${result.count === 1 ? "" : "s"}.`);
+              } else {
+                setError(result.error);
+              }
+            } catch {
+              setError("No se pudo generar el lote. Probá de nuevo.");
             }
           });
         }}

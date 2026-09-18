@@ -7,6 +7,7 @@ export type QrDto = {
   clientName: string | null;
   status: QrStatus;
   scanCount: number;
+  lastScannedAt: string | null;
   createdAt: string;
 };
 
@@ -18,6 +19,7 @@ export function toQrDto(qr: QrCode): QrDto {
     clientName: qr.clientName,
     status: qr.status,
     scanCount: qr.scanCount,
+    lastScannedAt: qr.lastScannedAt?.toISOString() ?? null,
     createdAt: qr.createdAt.toISOString(),
   };
 }

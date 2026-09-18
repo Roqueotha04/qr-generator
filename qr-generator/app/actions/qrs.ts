@@ -1,146 +1,187 @@
 "use server";
 
+import { Prisma } from "@prisma/client";
 import { revalidatePath } from "next/cache";
-import type { QrStatus } from "@prisma/client";
 import { createQrCodeSlug } from "@/lib/codes";
 import { prisma } from "@/lib/prisma";
-import { isQrStatus } from "@/lib/qr-status";
+import { canChangeStatus, canVoidQr } from "@/lib/qr-rules";
+import { parseCreateQrInput, parseRequiredId, parseUpdateQrInput } from "@/lib/qr-validation";
 import { requireAdmin } from "@/lib/require-admin";
 
-const MAX_BATCH = 50;
-
-export type QrListFilters = {
-  status?: QrStatus | "all";
-  client?: string;
-  from?: string;
-  to?: string;
-};
-
-export async function listQrs(filters: QrListFilters = {}) {
-  await requireAdmin();
-  const client = filters.client?.trim();
-  const createdAt = dateRange(filters.from, filters.to);
-
-  return prisma.qrCode.findMany({
-    where: {
-      ...(filters.status && filters.status !== "all" ? { status: filters.status } : {}),
-      ...(client ? { clientName: { contains: client } } : {}),
-      ...(createdAt ? { createdAt } : {}),
-    },
-    orderBy: { createdAt: "desc" },
-  });
-}
+const ALLOC_ROUNDS = 8;
+const UNIQUE_RETRIES = 5;
 
 export async function createQrs(input: {
-  count?: number;
-  destinationUrl?: string;
-  clientName?: string;
-  status?: string;
+  count?: unknown;
+  destinationUrl?: unknown;
+  clientName?: unknown;
+  status?: unknown;
 } = {}) {
   await requireAdmin();
 
-  const size = Number.isFinite(input.count)
-    ? Math.min(MAX_BATCH, Math.max(1, Math.floor(input.count ?? 1)))
-    : 1;
-  const destinationUrl = input.destinationUrl?.trim() ?? "";
-  const clientName = input.clientName?.trim() ?? "";
-
-  if (destinationUrl && !isHttpUrl(destinationUrl)) {
-    return { ok: false as const, error: "El link tiene que empezar con http:// o https://" };
+  const parsed = parseCreateQrInput(input);
+  if (!parsed.ok) {
+    return parsed;
   }
 
-  if (input.status && !isQrStatus(input.status)) {
-    return { ok: false as const, error: "Estado no válido" };
+  const { count, destinationUrl, clientName, status } = parsed.value;
+
+  try {
+    const created = await insertBatch({ count, destinationUrl, clientName, status });
+    revalidatePath("/admin");
+    revalidatePath("/admin/generar");
+    return { ok: true as const, count: created };
+  } catch {
+    return { ok: false as const, error: "No se pudo generar el lote. Probá de nuevo." };
   }
-
-  const created = [];
-
-  for (let i = 0; i < size; i += 1) {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      try {
-        const qr = await prisma.qrCode.create({
-          data: {
-            code: createQrCodeSlug(),
-            destinationUrl: destinationUrl || null,
-            clientName: clientName || null,
-            status: input.status && isQrStatus(input.status) ? input.status : "unused",
-          },
-        });
-        created.push(qr);
-        lastError = undefined;
-        break;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (lastError) {
-      throw lastError;
-    }
-  }
-
-  revalidatePath("/admin");
-  revalidatePath("/admin/generar");
-  return { ok: true as const, count: created.length };
 }
 
 export async function updateQr(input: {
-  id: string;
-  destinationUrl?: string;
-  clientName?: string;
-  status?: string;
+  id?: unknown;
+  destinationUrl?: unknown;
+  clientName?: unknown;
+  status?: unknown;
 }) {
   await requireAdmin();
 
-  const destinationUrl = input.destinationUrl?.trim() ?? "";
-  const clientName = input.clientName?.trim() ?? "";
-
-  if (destinationUrl && !isHttpUrl(destinationUrl)) {
-    return { ok: false as const, error: "El link tiene que empezar con http:// o https://" };
+  const parsed = parseUpdateQrInput(input);
+  if (!parsed.ok) {
+    return parsed;
   }
 
-  if (input.status && !isQrStatus(input.status)) {
-    return { ok: false as const, error: "Estado no válido" };
-  }
-
-  await prisma.qrCode.update({
-    where: { id: input.id },
-    data: {
-      destinationUrl: destinationUrl || null,
-      clientName: clientName || null,
-      ...(input.status && isQrStatus(input.status) ? { status: input.status } : {}),
-    },
+  const qr = await prisma.qrCode.findFirst({
+    where: { id: parsed.value.id, deletedAt: null },
   });
+
+  if (!qr) {
+    return { ok: false as const, error: "Este QR ya no está disponible" };
+  }
+
+  if (parsed.value.status && !canChangeStatus(qr.status, parsed.value.status)) {
+    return { ok: false as const, error: "Un QR vendido no puede volver a stock" };
+  }
+
+  try {
+    await prisma.qrCode.update({
+      where: { id: qr.id },
+      data: {
+        destinationUrl: parsed.value.destinationUrl,
+        clientName: parsed.value.clientName,
+        ...(parsed.value.status && canChangeStatus(qr.status, parsed.value.status)
+          ? { status: parsed.value.status }
+          : {}),
+      },
+    });
+  } catch (error) {
+    if (isMissingRecord(error)) {
+      return { ok: false as const, error: "Este QR ya no está disponible" };
+    }
+    return { ok: false as const, error: "No se pudo guardar. Probá de nuevo." };
+  }
 
   revalidatePath("/admin");
   return { ok: true as const };
 }
 
-function isHttpUrl(value: string) {
+export async function voidQr(input: { id?: unknown }) {
+  await requireAdmin();
+
+  const id = parseRequiredId(input.id);
+  if (!id.ok) {
+    return id;
+  }
+
+  const qr = await prisma.qrCode.findFirst({
+    where: { id: id.value, deletedAt: null },
+  });
+
+  if (!qr) {
+    return { ok: false as const, error: "Este QR ya no está disponible" };
+  }
+
+  if (!canVoidQr(qr)) {
+    return { ok: false as const, error: "Este QR no se puede anular" };
+  }
+
   try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
+    await prisma.qrCode.update({
+      where: { id: qr.id },
+      data: { deletedAt: new Date() },
+    });
+  } catch (error) {
+    if (isMissingRecord(error)) {
+      return { ok: false as const, error: "Este QR ya no está disponible" };
+    }
+    return { ok: false as const, error: "No se pudo anular. Probá de nuevo." };
   }
+
+  revalidatePath("/admin");
+  return { ok: true as const };
 }
 
-function dateRange(from?: string, to?: string) {
-  const start = parseDay(from, false);
-  const end = parseDay(to, true);
-  if (!start && !end) {
-    return undefined;
+async function insertBatch(input: {
+  count: number;
+  destinationUrl: string | null;
+  clientName: string | null;
+  status: "unused" | "in_process" | "sold";
+}) {
+  for (let attempt = 0; attempt < UNIQUE_RETRIES; attempt += 1) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const codes = await allocateUniqueCodes(tx, input.count);
+        await tx.qrCode.createMany({
+          data: codes.map((code) => ({
+            code,
+            destinationUrl: input.destinationUrl,
+            clientName: input.clientName,
+            status: input.status,
+          })),
+        });
+        return codes.length;
+      });
+    } catch (error) {
+      if (isUniqueConflict(error) && attempt < UNIQUE_RETRIES - 1) {
+        continue;
+      }
+      throw error;
+    }
   }
-  return {
-    ...(start ? { gte: start } : {}),
-    ...(end ? { lte: end } : {}),
-  };
+
+  throw new Error("QR_BATCH_FAILED");
 }
 
-function parseDay(value: string | undefined, endOfDay: boolean) {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return undefined;
+async function allocateUniqueCodes(
+  tx: Prisma.TransactionClient,
+  size: number,
+) {
+  const codes = new Set<string>();
+
+  for (let round = 0; round < ALLOC_ROUNDS && codes.size < size; round += 1) {
+    while (codes.size < size) {
+      codes.add(createQrCodeSlug());
+    }
+
+    const existing = await tx.qrCode.findMany({
+      where: { code: { in: [...codes] } },
+      select: { code: true },
+    });
+
+    for (const row of existing) {
+      codes.delete(row.code);
+    }
   }
-  const date = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00"}`);
-  return Number.isNaN(date.getTime()) ? undefined : date;
+
+  if (codes.size < size) {
+    throw new Error("QR_CODE_ALLOCATION_FAILED");
+  }
+
+  return [...codes];
+}
+
+function isUniqueConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+function isMissingRecord(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025";
 }
